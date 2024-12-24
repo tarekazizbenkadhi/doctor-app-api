@@ -7,6 +7,7 @@ const userModel = require('./models/user'); // Import the User model
 const admin = require('firebase-admin');
 
 const serviceAccount = require('../firebase-config.json');
+const bcrypt = require('bcrypt');
 
 
 require('dotenv').config();
@@ -37,6 +38,8 @@ app.listen(PORT, () => {
 admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
 });
+const saltRounds = 10;
+
 app.post('/signup', async (req, res) => {
     const { name, email, password, role } = req.body;
 
@@ -45,17 +48,20 @@ app.post('/signup', async (req, res) => {
     }
 
     try {
+        // Hash the password before saving it
+        const hashedPassword = await bcrypt.hash(password, saltRounds);
+
         // Create user in Firebase Authentication
         const firebaseUser = await admin.auth().createUser({
             email,
-            password,
+            password: hashedPassword,  // Firebase will handle the hashed password correctly
         });
 
-        // Save user details in MongoDB
+        // Save user details in MongoDB with hashed password
         const user = new userModel({
             name,
             email,
-            password:firebaseUser?.uid,
+            password: hashedPassword, // Store the hashed password in MongoDB
             role,
             isValidated: false,
         });
@@ -70,13 +76,7 @@ app.put('/validate-account', async (req, res) => {
     const { email } = req.body;
 
     try {
-        // Find the user in MongoDB
-        //const user = await User.findById(userId);
-//if (!user) return res.status(404).json({ message: 'User not found' });
-
-        // Update validation status
-
-        await userModel
+         await userModel
                 .findOneAndUpdate({
                   email: email,
                 })
@@ -89,24 +89,43 @@ app.put('/validate-account', async (req, res) => {
         res.status(500).json({ message: 'Error validating account', error: err.message });
     }
 });
+
+
 app.post('/signin', async (req, res) => {
     const { email, password } = req.body;
 
     try {
-        // Verify user credentials with Firebase
-        const firebaseToken = await admin.auth().createCustomToken(email);
-      
+        // First, verify the user with Firebase by their email
+        const userRecord = await admin.auth().getUserByEmail(email);
 
-        // Find user in MongoDB
-        const user = await userModel.findOne({ email });
-        
-        if (!user) return res.status(404).json({ message: 'User not found' });
-        if (!user.isValidated) return res.status(403).json({ message: 'Account not validated' });
+        // If the user exists, you can proceed to create the token
+        if (userRecord) {
+            // Create a custom token using the user's UID
+            const firebaseToken = await admin.auth().createCustomToken(userRecord.uid);
+            console.log('Firebase token:', firebaseToken);
 
-        res.status(200).json({ token: firebaseToken, role: user.role });
+            // Find user in MongoDB
+            const user = await userModel.findOne({ email });
+            if (!user) {
+                return res.status(404).json({ message: 'User not found' });
+            }
+
+            if (!user.isValidated) {
+                return res.status(403).json({ message: 'Account not validated' });
+            }
+
+            // Return the Firebase token and user role
+            res.status(200).json({ token: firebaseToken, role: user.role });
+        } else {
+            return res.status(404).json({ message: 'User not found in Firebase' });
+        }
+
     } catch (err) {
-        res.status(401).json({ message: 'Invalid credentials', error: err.message });
+        console.error('Error during sign-in:', err);
+        res.status(500).json({ message: 'Server error', error: err.message });
     }
 });
+
+
 
 
